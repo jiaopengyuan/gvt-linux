@@ -46,6 +46,8 @@
 #include "sched_policy.h"
 #include "render.h"
 #include "cmd_parser.h"
+#include "perf.h"
+#include "debugfs.h"
 
 #define GVT_MAX_VGPU 8
 
@@ -185,6 +187,8 @@ struct intel_vgpu {
 		atomic_t released;
 	} vdev;
 #endif
+
+        struct vgpu_statistics stat;
 };
 
 struct intel_gvt_gm {
@@ -276,6 +280,8 @@ struct intel_gvt {
 	struct task_struct *service_thread;
 	wait_queue_head_t service_thread_wq;
 	unsigned long service_request;
+
+        struct gvt_statistics stat;
 };
 
 static inline struct intel_gvt *to_gvt(struct drm_i915_private *i915)

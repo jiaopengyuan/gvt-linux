@@ -4,6 +4,11 @@
 #include <asm/alternative.h>
 #include <asm/nops.h>
 
+#ifndef alternative_2
+#define alternative_2(oldinstr, newinstr1, feature1, newinstr2, feature2) \
+        asm volatile(ALTERNATIVE_2(oldinstr, newinstr1, feature1, newinstr2, feature2) ::: "memory")
+#endif
+
 /*
  * Force strict CPU ordering.
  * And yes, this might be required on UP too when we're talking
@@ -81,5 +86,18 @@ do {									\
 #define __smp_mb__after_atomic()	barrier()
 
 #include <asm-generic/barrier.h>
+
+/*
+ * Stop RDTSC speculation. This is needed when you need to use RDTSC
+ * (or get_cycles or vread that possibly accesses the TSC) in a defined
+ * code region.
+ */
+#define X86_FEATURE_MFENCE_RDTSC ( 3*32+17) /* "" Mfence synchronizes RDTSC */
+#define X86_FEATURE_LFENCE_RDTSC ( 3*32+18) /* "" Lfence synchronizes RDTSC */
+static __always_inline void rdtsc_barrier(void)
+{
+        alternative_2("", "mfence", X86_FEATURE_MFENCE_RDTSC,
+                          "lfence", X86_FEATURE_LFENCE_RDTSC);
+}
 
 #endif /* _ASM_X86_BARRIER_H */

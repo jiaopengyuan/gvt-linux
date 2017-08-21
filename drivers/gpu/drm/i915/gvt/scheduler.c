@@ -221,6 +221,8 @@ int intel_gvt_scan_and_shadow_workload(struct intel_vgpu_workload *workload)
 	gvt_dbg_sched("ring id %d get i915 gem request %p\n", ring_id, rq);
 
 	workload->req = i915_gem_request_get(rq);
+        if (vgpu)
+                workload->req->perf.vgpu = vgpu;
 
 	ret = intel_gvt_scan_and_shadow_ringbuffer(workload);
 	if (ret)
@@ -250,14 +252,20 @@ static int dispatch_workload(struct intel_vgpu_workload *workload)
 	struct drm_i915_private *dev_priv = workload->vgpu->gvt->dev_priv;
 	struct intel_engine_cs *engine = dev_priv->engine[ring_id];
 	struct intel_vgpu *vgpu = workload->vgpu;
+        struct vgpu_statistics *vgpu_stat = &vgpu->stat;
 	int ret = 0;
+        cycles_t t0, t1;
 
 	gvt_dbg_sched("ring id %d prepare to dispatch workload %p\n",
 		ring_id, workload);
 
 	mutex_lock(&dev_priv->drm.struct_mutex);
 
-	ret = intel_gvt_scan_and_shadow_workload(workload);
+        t0 = i915_get_cycles();
+        ret = intel_gvt_scan_and_shadow_workload(workload);
+        t1 = i915_get_cycles();
+
+        vgpu_stat->scan_shadow_wl_cycles[ring_id] += t1 - t0;
 	if (ret)
 		goto out;
 
@@ -300,6 +308,7 @@ static struct intel_vgpu_workload *pick_next_workload(
 {
 	struct intel_gvt_workload_scheduler *scheduler = &gvt->scheduler;
 	struct intel_vgpu_workload *workload = NULL;
+        struct gvt_statistics *gvt_stat = &gvt->stat;
 
 	mutex_lock(&gvt->lock);
 
@@ -348,6 +357,10 @@ static struct intel_vgpu_workload *pick_next_workload(
 	atomic_inc(&workload->vgpu->running_workload_num);
 out:
 	mutex_unlock(&gvt->lock);
+        if (workload)
+                gvt_stat->pick_hit_cnt[ring_id]++;
+        else
+                gvt_stat->pick_miss_cnt[ring_id]++;
 	return workload;
 }
 
@@ -502,7 +515,10 @@ static int workload_thread(void *priv)
 	struct intel_gvt_workload_scheduler *scheduler = &gvt->scheduler;
 	struct intel_vgpu_workload *workload = NULL;
 	struct intel_vgpu *vgpu = NULL;
+        struct vgpu_statistics *vgpu_stat;
+        struct gvt_statistics *gvt_stat = &gvt->stat;
 	int ret;
+        cycles_t t[14];
 	bool need_force_wake = IS_SKYLAKE(gvt->dev_priv)
 			|| IS_KABYLAKE(gvt->dev_priv);
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
@@ -512,13 +528,18 @@ static int workload_thread(void *priv)
 	gvt_dbg_core("workload thread for ring %d started\n", ring_id);
 
 	while (!kthread_should_stop()) {
+                t[0] = i915_get_cycles();
 		add_wait_queue(&scheduler->waitq[ring_id], &wait);
 		do {
-			workload = pick_next_workload(gvt, ring_id);
+                        cycles_t t0, t1;
+  			workload = pick_next_workload(gvt, ring_id);
 			if (workload)
 				break;
+                        t0 = i915_get_cycles();
 			wait_woken(&wait, TASK_INTERRUPTIBLE,
 				   MAX_SCHEDULE_TIMEOUT);
+                        t1 = i915_get_cycles();
+                        gvt_stat->wait_workload_cycles[ring_id] += t1 - t0;
 		} while (!kthread_should_stop());
 		remove_wait_queue(&scheduler->waitq[ring_id], &wait);
 
@@ -529,6 +550,7 @@ static int workload_thread(void *priv)
 				workload->ring_id, workload,
 				workload->vgpu->id);
 
+                t[1] = i915_get_cycles();
 		intel_runtime_pm_get(gvt->dev_priv);
 
 		gvt_dbg_sched("ring id %d will dispatch workload %p\n",
@@ -537,10 +559,27 @@ static int workload_thread(void *priv)
 		if (need_force_wake)
 			intel_uncore_forcewake_get(gvt->dev_priv,
 					FORCEWAKE_ALL);
-
+                t[3] = i915_get_cycles();
 		mutex_lock(&gvt->lock);
+                t[4] = i915_get_cycles();
 		ret = dispatch_workload(workload);
+                t[5] = i915_get_cycles();
 		mutex_unlock(&gvt->lock);
+                t[6] = i915_get_cycles();
+
+                vgpu_stat = &workload->vgpu->stat;
+                workload->perf.queue_out_time = t[1];
+                vgpu_stat->workload_submit_cycles[ring_id] +=
+                                                workload->perf.queue_in_time -
+                                                workload->perf.submit_time;
+                vgpu_stat->workload_queue_in_out_cycles[ring_id] +=
+                                                workload->perf.queue_out_time -
+                                                workload->perf.queue_in_time;
+
+                vgpu_stat->pick_workload_cycles[ring_id] += t[1] - t[0];
+                vgpu_stat->schedule_misc_cycles[ring_id] += t[3] - t[1];
+                vgpu_stat->dispatch_lock_cycles[ring_id] += t[6] - t[3];
+                vgpu_stat->dispatch_cycles[ring_id] += t[5] - t[4];
 
 		if (ret) {
 			vgpu = workload->vgpu;
@@ -548,21 +587,29 @@ static int workload_thread(void *priv)
 			goto complete;
 		}
 
+                t[8] = i915_get_cycles();
 		gvt_dbg_sched("ring id %d wait workload %p\n",
 				workload->ring_id, workload);
 		i915_wait_request(workload->req, 0, MAX_SCHEDULE_TIMEOUT);
+                t[9] = i915_get_cycles();
+                vgpu_stat->wait_complete_cycles[ring_id] += t[9] - t[8];
 
 complete:
 		gvt_dbg_sched("will complete workload %p, status: %d\n",
 				workload, workload->status);
-
+                t[10] = i915_get_cycles();
 		complete_current_workload(gvt, ring_id);
+                t[11] = i915_get_cycles();
 
 		if (need_force_wake)
 			intel_uncore_forcewake_put(gvt->dev_priv,
 					FORCEWAKE_ALL);
 
 		intel_runtime_pm_put(gvt->dev_priv);
+                t[13] = i915_get_cycles();
+
+                vgpu_stat->after_complete_cycles[ring_id] += t[11] - t[10];
+                vgpu_stat->schedule_misc_cycles[ring_id] += t[13] - t[11];
 	}
 	return 0;
 }

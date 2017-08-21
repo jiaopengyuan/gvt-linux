@@ -626,6 +626,7 @@ static int submit_context(struct intel_vgpu *vgpu, int ring_id,
 	u64 ring_context_gpa;
 	u32 head, tail, start, ctl, ctx_ctl, per_ctx, indirect_ctx;
 	int ret;
+        cycles_t t = i915_get_cycles();
 
 	ring_context_gpa = intel_vgpu_gma_to_gpa(vgpu->gtt.ggtt_mm,
 			(u32)((desc->lrca + 1) << GTT_PAGE_SHIFT));
@@ -660,6 +661,7 @@ static int submit_context(struct intel_vgpu *vgpu, int ring_id,
 	if (!workload)
 		return -ENOMEM;
 
+        workload->perf.submit_time = t;
 	/* record some ring buffer register values for scan and shadow */
 	intel_gvt_hypervisor_read_gpa(vgpu, ring_context_gpa +
 			RING_CTX_OFF(rb_start.val), &start, 4);
@@ -732,6 +734,8 @@ static int submit_context(struct intel_vgpu *vgpu, int ring_id,
 	}
 
 	queue_workload(workload);
+        workload->perf.queue_in_time = i915_get_cycles();
+        vgpu->stat.requests_submitted_cnt[ring_id]++;
 	return 0;
 }
 
@@ -774,6 +778,7 @@ int intel_vgpu_submit_execlist(struct intel_vgpu *vgpu, int ring_id)
 		return -EINVAL;
 	}
 
+        vgpu->stat.elsp_cnt[ring_id]++;
 	/* submit workload */
 	for_each_set_bit(i, (void *)&valid_desc_bitmap, 2) {
 		ret = submit_context(vgpu, ring_id, &valid_desc[i],

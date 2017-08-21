@@ -250,6 +250,8 @@ int intel_gvt_init_device(struct drm_i915_private *dev_priv)
 	mutex_init(&gvt->lock);
 	gvt->dev_priv = dev_priv;
 
+        intel_gvt_init_debugfs(gvt);
+
 	init_device_info(gvt);
 
 	ret = intel_gvt_setup_mmio_info(gvt);

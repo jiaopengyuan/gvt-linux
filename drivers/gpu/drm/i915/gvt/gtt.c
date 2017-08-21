@@ -599,12 +599,22 @@ struct intel_vgpu_guest_page *intel_vgpu_find_guest_page(
 		struct intel_vgpu *vgpu, unsigned long gfn)
 {
 	struct intel_vgpu_guest_page *p;
+        cycles_t t0, t1;
+
+        t0 = i915_get_cycles();
 
 	hash_for_each_possible(vgpu->gtt.guest_page_hash_table,
 		p, node, gfn) {
-		if (p->gfn == gfn)
-			return p;
+                if (p->gfn == gfn) {
+                        t1 = i915_get_cycles();
+                        vgpu->stat.gpt_find_hit_cnt++;
+                        vgpu->stat.gpt_find_hit_cycles += t1 - t0;
+                        return p;
+                }
 	}
+        t1 = i915_get_cycles();
+        vgpu->stat.gpt_find_miss_cnt++;
+        vgpu->stat.gpt_find_miss_cycles += t1 - t0;
 	return NULL;
 }
 
@@ -711,7 +721,10 @@ static int ppgtt_write_protection_handler(void *gp, u64 pa,
 		void *p_data, int bytes)
 {
 	struct intel_vgpu_guest_page *gpt = (struct intel_vgpu_guest_page *)gp;
+        struct intel_vgpu_ppgtt_spt *spt = guest_page_to_ppgtt_spt(gpt);
+        struct intel_vgpu *vgpu = spt->vgpu;
 	int ret;
+        cycles_t t0, t1;
 
 	if (bytes != 4 && bytes != 8)
 		return -EINVAL;
@@ -719,8 +732,13 @@ static int ppgtt_write_protection_handler(void *gp, u64 pa,
 	if (!gpt->writeprotection)
 		return -EINVAL;
 
+        t0 = i915_get_cycles();
 	ret = ppgtt_handle_guest_write_page_table_bytes(gp,
 		pa, p_data, bytes);
+        t1 = i915_get_cycles();
+        vgpu->stat.ppgtt_wp_cnt++;
+        vgpu->stat.ppgtt_wp_cycles += t1 - t0;
+
 	if (ret)
 		return ret;
 	return ret;
@@ -776,12 +794,19 @@ err:
 static struct intel_vgpu_ppgtt_spt *ppgtt_find_shadow_page(
 		struct intel_vgpu *vgpu, unsigned long mfn)
 {
+        cycles_t t0 = i915_get_cycles();
 	struct intel_vgpu_shadow_page *p = find_shadow_page(vgpu, mfn);
+        cycles_t t1 = i915_get_cycles();
 
-	if (p)
-		return shadow_page_to_ppgtt_spt(p);
+        if (p) {
+                vgpu->stat.spt_find_hit_cnt++;
+                vgpu->stat.spt_find_hit_cycles += t1 - t0;
+                return shadow_page_to_ppgtt_spt(p);
+        }
 
 	gvt_vgpu_err("fail to find ppgtt shadow page: 0x%lx\n", mfn);
+        vgpu->stat.spt_find_miss_cnt++;
+        vgpu->stat.spt_find_miss_cycles += t1 - t0;
 	return NULL;
 }
 
@@ -887,6 +912,7 @@ static struct intel_vgpu_ppgtt_spt *ppgtt_populate_shadow_page_by_guest_entry(
 	struct intel_vgpu_ppgtt_spt *s = NULL;
 	struct intel_vgpu_guest_page *g;
 	int ret;
+        cycles_t t1, t2;
 
 	if (WARN_ON(!gtt_type_is_pt(get_next_pt_type(we->type)))) {
 		ret = -EINVAL;
@@ -899,12 +925,19 @@ static struct intel_vgpu_ppgtt_spt *ppgtt_populate_shadow_page_by_guest_entry(
 		ppgtt_get_shadow_page(s);
 	} else {
 		int type = get_next_pt_type(we->type);
+                t1 = i915_get_cycles();
 
 		s = ppgtt_alloc_shadow_page(vgpu, type, ops->get_pfn(we));
 		if (IS_ERR(s)) {
 			ret = PTR_ERR(s);
 			goto fail;
 		}
+
+                t2 = i915_get_cycles();
+                if (GTT_TYPE_PPGTT_PTE_PT == type) {
+                        vgpu->stat.shadow_last_level_page_cnt++;
+                        vgpu->stat.shadow_last_level_page_cycles += t2 - t1;
+                }
 
 		ret = intel_gvt_hypervisor_set_wp_page(vgpu, &s->guest_page);
 		if (ret)
@@ -1067,12 +1100,14 @@ static int sync_oos_page(struct intel_vgpu *vgpu,
 	struct intel_gvt_gtt_entry old, new, m;
 	int index;
 	int ret;
+        cycles_t t1, t2;
 
 	trace_oos_change(vgpu->id, "sync", oos_page->id,
 			oos_page->guest_page, spt->guest_page_type);
 
 	old.type = new.type = get_entry_type(spt->guest_page_type);
 	old.val64 = new.val64 = 0;
+        t1 = i915_get_cycles();
 
 	for (index = 0; index < (GTT_PAGE_SIZE >> info->gtt_entry_size_shift);
 		index++) {
@@ -1094,7 +1129,14 @@ static int sync_oos_page(struct intel_vgpu *vgpu,
 
 		ops->set_entry(oos_page->mem, &new, index, false, 0, vgpu);
 		ppgtt_set_shadow_entry(spt, &m, index);
+                vgpu->stat.oos_pte_cnt++;
 	}
+
+        t2 = i915_get_cycles();
+
+        vgpu->stat.oos_pte_cycles += t2 - t1;
+        vgpu->stat.oos_page_cnt++;
+        vgpu->stat.oos_page_cycles += t2 - t1;
 
 	oos_page->guest_page->write_cnt = 0;
 	list_del_init(&spt->post_shadow_list);
@@ -1807,12 +1849,17 @@ int intel_vgpu_emulate_gtt_mmio_read(struct intel_vgpu *vgpu, unsigned int off,
 {
 	const struct intel_gvt_device_info *info = &vgpu->gvt->device_info;
 	int ret;
+        cycles_t t0, t1;
 
 	if (bytes != 4 && bytes != 8)
 		return -EINVAL;
 
+        t0 = i915_get_cycles();
 	off -= info->gtt_start_offset;
 	ret = emulate_gtt_mmio_read(vgpu, off, p_data, bytes);
+        t1 = i915_get_cycles();
+        vgpu->stat.gtt_mmio_rcnt++;
+        vgpu->stat.gtt_mmio_rcycles += (u64) (t1 - t0);
 	return ret;
 }
 
@@ -1880,12 +1927,17 @@ int intel_vgpu_emulate_gtt_mmio_write(struct intel_vgpu *vgpu, unsigned int off,
 {
 	const struct intel_gvt_device_info *info = &vgpu->gvt->device_info;
 	int ret;
+        cycles_t t0, t1;
 
-	if (bytes != 4 && bytes != 8)
-		return -EINVAL;
+        if (bytes != 4 && bytes != 8)
+                return -EINVAL;
 
-	off -= info->gtt_start_offset;
-	ret = emulate_gtt_mmio_write(vgpu, off, p_data, bytes);
+        t0 = i915_get_cycles();
+        off -= info->gtt_start_offset;
+        ret = emulate_gtt_mmio_write(vgpu, off, p_data, bytes);
+        t1 = i915_get_cycles();
+        vgpu->stat.gtt_mmio_wcnt++;
+        vgpu->stat.gtt_mmio_wcycles += (u64) (t1 - t0);
 	return ret;
 }
 

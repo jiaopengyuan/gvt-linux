@@ -26,6 +26,9 @@
 #include "intel_uc.h"
 
 #include <trace/events/dma_fence.h>
+#ifdef CONFIG_DRM_I915_GVT
+#include "gvt.h"
+#endif
 
 /**
  * DOC: GuC-based command submission
@@ -691,6 +694,15 @@ static bool i915_guc_dequeue(struct intel_engine_cs *engine)
                         engine->i915->perf.gpu_cycles[engine->id] += gpu_cycles;
                         engine->i915->perf.request_completed_cnt[engine->id]++;
                         engine->i915->perf.lite_restore_cnt[engine->id]++;
+
+#ifdef CONFIG_DRM_I915_GVT
+                        if (last->perf.vgpu) {
+                                struct intel_vgpu *vgpu = last->perf.vgpu;
+
+                                vgpu->stat.gpu_cycles[engine->id] += gpu_cycles;
+                                vgpu->stat.requests_completed_cnt[engine->id]++;
+                        }
+#endif
                 }
 
 		i915_guc_submit(rq);
@@ -721,7 +733,7 @@ static void i915_guc_irq_handler(unsigned long data)
 	do {
 		rq = port[0].request;
 		while (rq && i915_gem_request_completed(rq)) {
-                        cycle_t t = i915_get_cycles();
+                        cycles_t t = i915_get_cycles();
                         u64 gpu_cycles;
 
 			trace_i915_gem_request_out(rq);
@@ -732,6 +744,15 @@ static void i915_guc_irq_handler(unsigned long data)
 
                         i915->perf.gpu_cycles[engine->id] += gpu_cycles;
                         i915->perf.request_completed_cnt[engine->id]++;
+
+#ifdef CONFIG_DRM_I915_GVT
+                        if (rq->perf.vgpu) {
+                                struct intel_vgpu *vgpu = rq->perf.vgpu;
+
+                                vgpu->stat.gpu_cycles[engine->id] += gpu_cycles;
+                                vgpu->stat.requests_completed_cnt[engine->id]++;
+                        }
+#endif
 
 			i915_gem_request_put(rq);
 			port[0].request = port[1].request;

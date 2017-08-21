@@ -185,6 +185,9 @@ struct drm_i915_gem_request {
         struct {
                 u64 schedule_in_cycles;
                 u64 schedule_out_cycles;
+#ifdef CONFIG_DRM_I915_GVT
+                struct intel_vgpu *vgpu;
+#endif
         } perf;
 };
 

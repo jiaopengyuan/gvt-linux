@@ -759,8 +759,8 @@ static int i915_perf_info(struct seq_file *m, void *data)
                                dev_priv->perf.request_submitted_cnt[id]);
                seq_printf(m, "\tRequest Completed Count=%lld\n",
                                dev_priv->perf.request_completed_cnt[id]);
-               seq_printf(m, "\tPreempt Cnt=%lld\n",
-                               dev_priv->perf.preempt_cnt[id]);
+               //seq_printf(m, "\tPreempt Cnt=%lld\n",
+               //                dev_priv->perf.preempt_cnt[id]);
                seq_printf(m, "\tLite Restore Cnt=%lld\n",
                                dev_priv->perf.lite_restore_cnt[id]);
        }

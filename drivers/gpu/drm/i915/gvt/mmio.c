@@ -51,11 +51,37 @@ int intel_vgpu_gpa_to_mmio_offset(struct intel_vgpu *vgpu, u64 gpa)
 }
 
 #define reg_is_mmio(gvt, reg)  \
-	(reg >= 0 && reg < gvt->device_info.mmio_size)
+        (reg >= 0 && reg < gvt->device_info.mmio_size)
 
 #define reg_is_gtt(gvt, reg)   \
-	(reg >= gvt->device_info.gtt_start_offset \
-	 && reg < gvt->device_info.gtt_start_offset + gvt_ggtt_sz(gvt))
+        (reg >= gvt->device_info.gtt_start_offset \
+         && reg < gvt->device_info.gtt_start_offset + gvt_ggtt_sz(gvt))
+
+static inline void mmio_accounting_read(struct intel_vgpu *vgpu,
+               unsigned long offset, cycles_t cycles)
+{
+        struct vgpu_mmio_accounting_reg_stat *stat;
+
+        if (!vgpu->stat.mmio_accounting)
+                return;
+
+        stat = &vgpu->stat.mmio_accounting_reg_stats[offset >> 2];
+        stat->r_count++;
+        stat->r_cycles += cycles;
+}
+
+static inline void mmio_accounting_write(struct intel_vgpu *vgpu,
+               unsigned long offset, cycles_t cycles)
+{
+        struct vgpu_mmio_accounting_reg_stat *stat;
+
+        if (!vgpu->stat.mmio_accounting)
+                return;
+
+        stat = &vgpu->stat.mmio_accounting_reg_stats[offset >> 2];
+        stat->w_count++;
+        stat->w_cycles += cycles;
+}
 
 static void failsafe_emulate_mmio_rw(struct intel_vgpu *vgpu, uint64_t pa,
 		void *p_data, unsigned int bytes, bool read)
@@ -125,14 +151,20 @@ int intel_vgpu_emulate_mmio_read(struct intel_vgpu *vgpu, uint64_t pa,
 	struct intel_gvt *gvt = vgpu->gvt;
 	unsigned int offset = 0;
 	int ret = -EINVAL;
+        cycles_t t0, t1, t0_rl, t1_rl;
 
 
 	if (vgpu->failsafe) {
 		failsafe_emulate_mmio_rw(vgpu, pa, p_data, bytes, true);
 		return 0;
 	}
-	mutex_lock(&gvt->lock);
 
+        t0_rl = i915_get_cycles();
+	mutex_lock(&gvt->lock);
+        t1_rl = i915_get_cycles();
+        vgpu->stat.mmio_rl_cycles += t1_rl - t0_rl;
+
+        t0 = i915_get_cycles();
 	if (atomic_read(&vgpu->gtt.n_write_protected_guest_page)) {
 		struct intel_vgpu_guest_page *gp;
 
@@ -191,7 +223,17 @@ int intel_vgpu_emulate_mmio_read(struct intel_vgpu *vgpu, uint64_t pa,
 		goto err;
 
 	intel_gvt_mmio_set_accessed(gvt, offset);
-	mutex_unlock(&gvt->lock);
+        t1 = i915_get_cycles();
+        vgpu->stat.mmio_rcnt++;
+        vgpu->stat.mmio_rcycles += t1 - t0;
+        mmio_accounting_read(vgpu, offset, t1 - t0);
+
+        t0_rl = i915_get_cycles();
+        mutex_unlock(&vgpu->gvt->lock);
+        t1_rl = i915_get_cycles();
+        vgpu->stat.mmio_rl_cycles += t1_rl - t0_rl;
+        vgpu->stat.mmio_rl_cnt++;
+
 	return 0;
 err:
 	gvt_vgpu_err("fail to emulate MMIO read %08x len %d\n",
@@ -216,14 +258,19 @@ int intel_vgpu_emulate_mmio_write(struct intel_vgpu *vgpu, uint64_t pa,
 	struct intel_gvt *gvt = vgpu->gvt;
 	unsigned int offset = 0;
 	int ret = -EINVAL;
+        cycles_t t0, t1, t0_wl, t1_wl;
 
 	if (vgpu->failsafe) {
 		failsafe_emulate_mmio_rw(vgpu, pa, p_data, bytes, false);
 		return 0;
 	}
 
-	mutex_lock(&gvt->lock);
+        t0_wl = i915_get_cycles();
+        mutex_lock(&vgpu->gvt->lock);
+        t1_wl = i915_get_cycles();
+        vgpu->stat.mmio_wl_cycles += t1_wl - t0_wl;
 
+        t0 = i915_get_cycles();
 	if (atomic_read(&vgpu->gtt.n_write_protected_guest_page)) {
 		struct intel_vgpu_guest_page *gp;
 
@@ -237,7 +284,15 @@ int intel_vgpu_emulate_mmio_write(struct intel_vgpu *vgpu, uint64_t pa,
 					ret, gp->gfn, pa,
 					*(u32 *)p_data, bytes);
 			}
-			mutex_unlock(&gvt->lock);
+                        t1 = i915_get_cycles();
+                        vgpu->stat.wp_cycles += t1 - t0;
+                        vgpu->stat.wp_cnt++;
+
+                        t0_wl = i915_get_cycles();
+                        mutex_unlock(&vgpu->gvt->lock);
+                        t1_wl = i915_get_cycles();
+                        vgpu->stat.mmio_wl_cycles += t1_wl - t0_wl;
+                        vgpu->stat.mmio_wl_cnt++;
 			return ret;
 		}
 	}
@@ -259,13 +314,23 @@ int intel_vgpu_emulate_mmio_write(struct intel_vgpu *vgpu, uint64_t pa,
 				p_data, bytes);
 		if (ret)
 			goto err;
-		mutex_unlock(&gvt->lock);
+
+                t0_wl = i915_get_cycles();
+                mutex_unlock(&vgpu->gvt->lock);
+                t1_wl = i915_get_cycles();
+                vgpu->stat.mmio_wl_cycles += t1_wl - t0_wl;
+                vgpu->stat.mmio_wl_cnt++;
 		return ret;
 	}
 
 	if (WARN_ON_ONCE(!reg_is_mmio(gvt, offset))) {
 		ret = intel_gvt_hypervisor_write_gpa(vgpu, pa, p_data, bytes);
-		mutex_unlock(&gvt->lock);
+
+                t0_wl = i915_get_cycles();
+                mutex_unlock(&vgpu->gvt->lock);
+                t1_wl = i915_get_cycles();
+                vgpu->stat.mmio_wl_cycles += t1_wl - t0_wl;
+                vgpu->stat.mmio_wl_cnt++;
 		return ret;
 	}
 
@@ -274,12 +339,26 @@ int intel_vgpu_emulate_mmio_write(struct intel_vgpu *vgpu, uint64_t pa,
 		goto err;
 
 	intel_gvt_mmio_set_accessed(gvt, offset);
-	mutex_unlock(&gvt->lock);
-	return 0;
+        t1 = i915_get_cycles();
+        vgpu->stat.mmio_wcnt++;
+        vgpu->stat.mmio_wcycles += t1 - t0;
+        mmio_accounting_write(vgpu, offset, t1 - t0);
+	
+        t0_wl = i915_get_cycles();
+        mutex_unlock(&vgpu->gvt->lock);
+        t1_wl = i915_get_cycles();
+        vgpu->stat.mmio_wl_cycles += t1_wl - t0_wl;
+        vgpu->stat.mmio_wl_cnt++;
+        return 0;
 err:
 	gvt_vgpu_err("fail to emulate MMIO write %08x len %d\n", offset,
 		     bytes);
-	mutex_unlock(&gvt->lock);
+
+        t0_wl = i915_get_cycles();
+        mutex_unlock(&vgpu->gvt->lock);
+        t1_wl = i915_get_cycles();
+        vgpu->stat.mmio_wl_cycles += t1_wl - t0_wl;
+        vgpu->stat.mmio_wl_cnt++;
 	return ret;
 }
 
