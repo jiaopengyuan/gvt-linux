@@ -680,10 +680,25 @@ static bool i915_guc_dequeue(struct intel_engine_cs *engine)
 		RB_CLEAR_NODE(&rq->priotree.node);
 		rq->priotree.priority = INT_MAX;
 
+                if (last && port == engine->execlist_port) {
+                        cycles_t t = i915_get_cycles();
+                        u64 gpu_cycles;
+
+                        last->perf.schedule_out_cycles = t;
+                        gpu_cycles = last->perf.schedule_out_cycles -
+                                last->perf.schedule_in_cycles;
+
+                        engine->i915->perf.gpu_cycles[engine->id] += gpu_cycles;
+                        engine->i915->perf.request_completed_cnt[engine->id]++;
+                        engine->i915->perf.lite_restore_cnt[engine->id]++;
+                }
+
 		i915_guc_submit(rq);
 		trace_i915_gem_request_in(rq, port - engine->execlist_port);
 		last = rq;
 		submit = true;
+                rq->perf.schedule_in_cycles = i915_get_cycles();
+                engine->i915->perf.request_submitted_cnt[engine->id]++;
 	}
 	if (submit) {
 		i915_gem_request_assign(&port->request, last);
@@ -700,16 +715,30 @@ static void i915_guc_irq_handler(unsigned long data)
 	struct intel_engine_cs *engine = (struct intel_engine_cs *)data;
 	struct execlist_port *port = engine->execlist_port;
 	struct drm_i915_gem_request *rq;
+        struct drm_i915_private *i915 = engine->i915;
 	bool submit;
 
 	do {
 		rq = port[0].request;
 		while (rq && i915_gem_request_completed(rq)) {
+                        cycle_t t = i915_get_cycles();
+                        u64 gpu_cycles;
+
 			trace_i915_gem_request_out(rq);
+
+                        rq->perf.schedule_out_cycles = t;
+                        gpu_cycles = rq->perf.schedule_out_cycles -
+                                rq->perf.schedule_in_cycles;
+
+                        i915->perf.gpu_cycles[engine->id] += gpu_cycles;
+                        i915->perf.request_completed_cnt[engine->id]++;
+
 			i915_gem_request_put(rq);
 			port[0].request = port[1].request;
 			port[1].request = NULL;
 			rq = port[0].request;
+                        if (rq)
+                                rq->perf.schedule_in_cycles = t;
 		}
 
 		submit = false;

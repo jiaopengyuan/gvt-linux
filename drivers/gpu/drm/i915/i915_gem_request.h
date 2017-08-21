@@ -181,6 +181,11 @@ struct drm_i915_gem_request {
 	struct drm_i915_file_private *file_priv;
 	/** file_priv list entry for this request */
 	struct list_head client_link;
+
+        struct {
+                u64 schedule_in_cycles;
+                u64 schedule_out_cycles;
+        } perf;
 };
 
 extern const struct dma_fence_ops i915_fence_ops;

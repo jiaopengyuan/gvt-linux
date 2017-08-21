@@ -737,6 +737,38 @@ static int i915_gem_seqno_info(struct seq_file *m, void *data)
 }
 
 
+static int i915_perf_info(struct seq_file *m, void *data)
+{
+       struct drm_i915_private *dev_priv = node_to_i915(m->private);
+       int id;
+
+       seq_printf(m, "MMIO Read Cnt=%lld\n",
+                  dev_priv->perf.mmio_read_cnt);
+       seq_printf(m, "MMIO Read Cycles=%lld\n",
+                  dev_priv->perf.mmio_read_cycles);
+       seq_printf(m, "MMIO Write Cnt=%lld\n",
+                  dev_priv->perf.mmio_write_cnt);
+       seq_printf(m, "MMIO Write Cycles=%lld\n",
+                  dev_priv->perf.mmio_write_cycles);
+
+       for (id = 0; id < I915_NUM_ENGINES; id++) {
+               seq_printf(m, "Ring %d\n", id);
+               seq_printf(m, "\tGPU Cycles=%lld\n",
+                               dev_priv->perf.gpu_cycles[id]);
+               seq_printf(m, "\tRequest Submitted Count=%lld\n",
+                               dev_priv->perf.request_submitted_cnt[id]);
+               seq_printf(m, "\tRequest Completed Count=%lld\n",
+                               dev_priv->perf.request_completed_cnt[id]);
+               seq_printf(m, "\tPreempt Cnt=%lld\n",
+                               dev_priv->perf.preempt_cnt[id]);
+               seq_printf(m, "\tLite Restore Cnt=%lld\n",
+                               dev_priv->perf.lite_restore_cnt[id]);
+       }
+
+       return 0;
+}
+
+
 static int i915_interrupt_info(struct seq_file *m, void *data)
 {
 	struct drm_i915_private *dev_priv = node_to_i915(m->private);
@@ -4815,6 +4847,7 @@ static const struct drm_info_list i915_debugfs_list[] = {
 	{"i915_sseu_status", i915_sseu_status, 0},
 	{"i915_drrs_status", i915_drrs_status, 0},
 	{"i915_rps_boost_info", i915_rps_boost_info, 0},
+	{"i915_perf_info", i915_perf_info, 0},
 };
 #define I915_DEBUGFS_ENTRIES ARRAY_SIZE(i915_debugfs_list)
 

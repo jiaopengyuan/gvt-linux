@@ -603,6 +603,7 @@ i915_gem_request_alloc(struct intel_engine_cs *engine,
 	req->global_seqno = 0;
 	req->file_priv = NULL;
 	req->batch = NULL;
+        memset(&req->perf, 0, sizeof(req->perf));
 
 	/*
 	 * Reserve space in the ring buffer for all the commands required to

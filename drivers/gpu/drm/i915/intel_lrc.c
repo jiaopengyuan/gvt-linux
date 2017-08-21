@@ -346,6 +346,7 @@ static void execlists_submit_ports(struct intel_engine_cs *engine)
 	u32 __iomem *elsp =
 		dev_priv->regs + i915_mmio_reg_offset(RING_ELSP(engine));
 	u64 desc[2];
+        cycles_t t = get_cycles();
 
 	GEM_BUG_ON(port[0].count > 1);
 	if (!port[0].count)
@@ -400,6 +401,7 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
 	struct execlist_port *port = engine->execlist_port;
 	struct rb_node *rb;
 	bool submit = false;
+        cycles_t t;
 
 	last = port->request;
 	if (last)
@@ -468,7 +470,19 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
 
 			GEM_BUG_ON(last->ctx == cursor->ctx);
 
+                        t = get_cycles();
+                        if (port->count > 0) {
+                                struct drm_i915_gem_request *rq = port->request;
+
+                                rq->perf.schedule_out_cycles = t;
+                                engine->i915->perf.gpu_cycles[engine->id] +=
+                                        rq->perf.schedule_out_cycles -
+                                        rq->perf.schedule_in_cycles;
+                        }
+
 			i915_gem_request_assign(&port->request, last);
+                        last->perf.schedule_in_cycles = t;
+                        engine->i915->perf.request_submitted_cnt[engine->id]++;
 			port++;
 		}
 
@@ -483,7 +497,18 @@ static void execlists_dequeue(struct intel_engine_cs *engine)
 		submit = true;
 	}
 	if (submit) {
+                t = i915_get_cycles();
+                if (port->count > 0) {
+                        struct drm_i915_gem_request *rq = port->request;
+
+                        rq->perf.schedule_out_cycles = t;
+                        engine->i915->perf.gpu_cycles[engine->id] +=
+                                rq->perf.schedule_out_cycles -
+                                rq->perf.schedule_in_cycles;
+                }
 		i915_gem_request_assign(&port->request, last);
+                last->perf.schedule_in_cycles = t;
+                engine->i915->perf.request_submitted_cnt[engine->id]++;
 		engine->execlist_first = rb;
 	}
 	spin_unlock_irq(&engine->timeline->lock);
@@ -574,16 +599,34 @@ static void intel_lrc_irq_handler(unsigned long data)
 
 			GEM_BUG_ON(port[0].count == 0);
 			if (--port[0].count == 0) {
+                                cycles_t t = i915_get_cycles();
+                                struct drm_i915_gem_request *rq;
+                                int id = engine->id;
+
 				GEM_BUG_ON(status & GEN8_CTX_STATUS_PREEMPTED);
 				GEM_BUG_ON(!i915_gem_request_completed(port[0].request));
 				execlists_context_status_change(port[0].request,
 								INTEL_CONTEXT_SCHEDULE_OUT);
 
+                                rq = port[0].request;
+                                rq->perf.schedule_out_cycles = t;
+                                dev_priv->perf.gpu_cycles[engine->id] +=
+                                        rq->perf.schedule_out_cycles -
+                                        rq->perf.schedule_in_cycles;
+                                dev_priv->perf.request_completed_cnt[id]++;
+
 				trace_i915_gem_request_out(port[0].request);
 				i915_gem_request_put(port[0].request);
 				port[0] = port[1];
 				memset(&port[1], 0, sizeof(port[1]));
-			}
+                                if (rq)
+                                        rq->perf.schedule_in_cycles = t;
+                        } else {
+                                int id = engine->id;
+
+                                dev_priv->perf.request_completed_cnt[id]++;
+                                dev_priv->perf.lite_restore_cnt[id]++;
+ 			}
 
 			GEM_BUG_ON(port[0].count == 0 &&
 				   !(status & GEN8_CTX_STATUS_ACTIVE_IDLE));

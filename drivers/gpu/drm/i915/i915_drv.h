@@ -114,6 +114,15 @@ typedef struct {
 	fp; \
 })
 
+#define i915_get_cycles() ({             \
+               cycles_t __ret;         \
+               rdtsc_barrier();        \
+               __ret = get_cycles();   \
+               rdtsc_barrier();        \
+               __ret;                  \
+               })
+
+
 static inline uint_fixed_16_16_t u32_to_fixed_16_16(uint32_t val)
 {
 	uint_fixed_16_16_t fp;
@@ -2481,6 +2490,15 @@ struct drm_i915_private {
 			const struct i915_oa_format *oa_formats;
 			int n_builtin_sets;
 		} oa;
+                u64 mmio_read_cnt;
+                u64 mmio_read_cycles;
+                u64 mmio_write_cnt;
+                u64 mmio_write_cycles;
+                u64 gpu_cycles[I915_NUM_ENGINES];
+                u64 request_submitted_cnt[I915_NUM_ENGINES];
+                u64 request_completed_cnt[I915_NUM_ENGINES];
+                u64 preempt_cnt[I915_NUM_ENGINES];
+                u64 lite_restore_cnt[I915_NUM_ENGINES];
 	} perf;
 
 	/* Abstract the submission mechanism (legacy ringbuffer or execlists) away */
@@ -3954,14 +3972,35 @@ u64 intel_rc6_residency_us(struct drm_i915_private *dev_priv,
 static inline uint##x##_t __raw_i915_read##x(const struct drm_i915_private *dev_priv, \
 					     i915_reg_t reg) \
 { \
-	return read##s(dev_priv->regs + i915_mmio_reg_offset(reg)); \
+        u##x ret; \
+        cycles_t t0, t1; \
+        t0 = i915_get_cycles(); \
+        if (!intel_vgpu_active(dev_priv) || !i915.enable_pvmmio || \
+                likely(!in_mmio_read_trap_list((reg).reg))) \
+                ret = read##s(dev_priv->regs + i915_mmio_reg_offset(reg)); \
+                t1 = i915_get_cycles(); \
+                dev_priv->perf.mmio_read_cnt++; \
+                dev_priv->perf.mmio_read_cycles += t1 - t0; \
+                return ret; \
+        dev_priv->shared_page->reg_addr = i915_mmio_reg_offset(reg); \
+        ret = read##s(dev_priv->regs +  \
+                        i915_mmio_reg_offset(vgtif_reg(pv_mmio))); \
+        t1 = i915_get_cycles(); \
+        dev_priv->perf.mmio_read_cnt++; \
+        dev_priv->perf.mmio_read_cycles += t1 - t0; \
+        return ret; \
 }
 
 #define __raw_write(x, s) \
 static inline void __raw_i915_write##x(const struct drm_i915_private *dev_priv, \
 				       i915_reg_t reg, uint##x##_t val) \
 { \
+        cycles_t t0, t1; \
+        t0 = i915_get_cycles(); \
 	write##s(val, dev_priv->regs + i915_mmio_reg_offset(reg)); \
+        t1 = i915_get_cycles(); \
+        dev_priv->perf.mmio_write_cnt++; \
+        dev_priv->perf.mmio_write_cycles += t1 - t0; \
 }
 __raw_read(8, b)
 __raw_read(16, w)
